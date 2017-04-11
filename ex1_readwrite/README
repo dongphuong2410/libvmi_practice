@@ -1,0 +1,18 @@
+There is a process running in your VM called “test”.
+It has an integer allocated on the heap, with its pointer on the stack. We know
+the address of the pointer on the stack.
+1. Get the value stored on the heap using LibVMI and print it
+2. Change the value of this integer on the heap
+
+# Execution steps
+
+1. Compile and run test.c on Windows guest machine (windows)
+2. Record the PID and stack address
+3. Run monitor 
+    $ sudo ./monitor windows <PID> <stack_address>
+    For example
+    $ sudo ./monitor  windows 3024 0x28ff0c
+    Heap address 0x3b0ed0
+    Test value 1
+    Modify test value to 15
+4. Observe on windows guest, test value is changed

@@ -1,0 +1,7 @@
+## Test vm pause and unpause
+
+## Compile
+$ make
+
+## Run
+$ sudo ./main domID
