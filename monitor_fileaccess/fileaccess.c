@@ -21,9 +21,12 @@
 
 static uint8_t trap = 0xCC;
 static uint8_t backup_byte;
+static uint8_t backup_ret_byte;
+static uint8_t ret_trap_set = 0;
 static int i;
 char *syscall_name;
-uint64_t syscall_addr;
+uint64_t syscall_va;
+uint64_t ret_pa;
 
 /* Signal handler */
 static struct sigaction act;
@@ -33,35 +36,56 @@ static void close_handler(int sig) {
 }
 
 event_response_t singlestep_cb(vmi_instance_t vmi, vmi_event_t *event) {
-    vmi_write_8_va(vmi, syscall_addr, 0, &trap);
+    uint64_t pa = (event->interrupt_event.gfn << 12) + event->interrupt_event.offset + event->interrupt_event.insn_length - 1;
+    //if (pa == ret_pa)
+    //    vmi_write_8_pa(vmi, ret_pa, &trap);
+    //else
+        vmi_write_8_va(vmi, syscall_va, 0, &trap);
     event_response_t rsp = 0;
     return rsp | VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP;
 }
 
 event_response_t trap_cb(vmi_instance_t vmi, vmi_event_t *event) {
-    //printf("Received a trap event for syscall %s!\n", syscall_name);
-
-    //Check the tag of AllocatePool event
-    uint64_t tag = 0, size = 0;
-    access_context_t ctx;
-    ctx.translate_mechanism = VMI_TM_PROCESS_DTB;
-    ctx.dtb = event->x86_regs->cr3;
-    if (vmi_get_page_mode(vmi) == VMI_PM_IA32E) {
-        size = event->x86_regs->rdx;
-        tag = event->x86_regs->r8;
-    }
-    else {
-        ctx.addr = event->x86_regs->rsp+8;
-        if (VMI_FAILURE == vmi_read_32(vmi, &ctx, (uint32_t*)&size))
-            return 0;
-        ctx.addr = event->x86_regs->rsp+12;
-        if (VMI_FAILURE == vmi_read_32(vmi, &ctx, (uint32_t*)&tag))
-            return 0;
-    }
-    if (!memcmp(&tag, &POOLTAG_FILE, 4)) {
-        printf("FILE ALLOCATION\n");
-    }
-    vmi_write_8_va(vmi, syscall_addr, 0, &backup_byte);
+    uint64_t pa = (event->interrupt_event.gfn << 12) + event->interrupt_event.offset + event->interrupt_event.insn_length - 1;
+    //if (pa == ret_pa) {
+        //printf("Heap Allocation Ret\n");
+        //vmi_write_8_va(vmi, ret_pa, 0, &backup_ret_byte);
+    //}
+    //else {
+        //Check if this is allocated for FILE
+        //If it is, insert the trap at the return point of this function, if it is not yet set
+        uint64_t tag = 0, size = 0;
+        access_context_t ctx;
+        ctx.translate_mechanism = VMI_TM_PROCESS_DTB;
+        ctx.dtb = event->x86_regs->cr3;
+        if (vmi_get_page_mode(vmi) == VMI_PM_IA32E) {
+            size = event->x86_regs->rdx;
+            tag = event->x86_regs->r8;
+        }
+        else {
+            ctx.addr = event->x86_regs->rsp+8;
+            if (VMI_FAILURE == vmi_read_32(vmi, &ctx, (uint32_t*)&size))
+                return 0;
+            ctx.addr = event->x86_regs->rsp+12;
+            if (VMI_FAILURE == vmi_read_32(vmi, &ctx, (uint32_t*)&tag))
+                return 0;
+        }
+        if (!memcmp(&tag, &POOLTAG_FILE, 4)) {
+            if (!ret_trap_set) {
+                printf("POOLTAG_FILE\n");
+                uint64_t ret;
+                ctx.addr = event->x86_regs->rsp;
+                if (VMI_FAILURE == vmi_read_addr(vmi, &ctx, &ret))
+                    return 0;
+                ret_pa = vmi_pagetable_lookup(vmi, event->x86_regs->cr3, ret);
+                ret_trap_set = 1;
+                //Set breakpoint for HeapRetTrap
+                //vmi_read_8_pa(vmi, ret_pa, &backup_ret_byte);
+                //vmi_write_8_pa(vmi, ret_pa, &trap);
+            }
+        }
+        vmi_write_8_va(vmi, syscall_va, 0, &backup_byte);
+    //}
     event->interrupt_event.reinject = 0;
     event_response_t rsp = 0;
     return rsp | VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP;
@@ -101,10 +125,10 @@ int main(int argc, char **argv)
     syscall_name = "ExAllocatePoolWithTag";
     uint64_t rva = util_find_function_rva(rekall_profile, syscall_name);
     uint64_t kernbase = util_find_kernbase(vmi, rekall_profile);
-    syscall_addr = kernbase + rva;
-    if (syscall_addr != 0) {
-        vmi_read_8_va(vmi, syscall_addr, 0, &backup_byte);
-        vmi_write_8_va(vmi, syscall_addr, 0, &trap);
+    syscall_va = kernbase + rva;
+    if (syscall_va != 0) {
+        vmi_read_8_va(vmi, syscall_va, 0, &backup_byte);
+        vmi_write_8_va(vmi, syscall_va, 0, &trap);
     }
 
     //STEP 3 : register trap event and single step event (single step event is not enabled yet)
@@ -119,7 +143,7 @@ int main(int argc, char **argv)
         vmi_events_listen(vmi, 500);
     }
 
-    vmi_write_8_va(vmi, syscall_addr, 0, &backup_byte);
+    vmi_write_8_va(vmi, syscall_va, 0, &backup_byte);
     vmi_clear_event(vmi, &trap_event, NULL);
     vmi_clear_event(vmi, &singlestep_event, NULL);
     vmi_destroy(vmi);
